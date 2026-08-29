@@ -1,0 +1,57 @@
+{
+  "listen": ":8080",
+  "prompt_store_path": "data/prompts.json",
+  "metrics_capacity": 500,
+  "log_metrics": true,
+  "retry": {
+    "max_retries": 3,
+    "base_delay_ms": 200,
+    "max_delay_ms": 5000,
+    "factor": 2,
+    "jitter": 0.2
+  },
+  "models": [
+    {
+      "model": "deepseek-v4-pro",
+      "upstream_model": "deepseek-v4-pro",
+      "protocol": "openai_responses",
+      "base_url": "http://127.0.0.1:9090",
+      "base_url_env": "UPSTREAM_RESPONSES_BASE_URL",
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "timeout_ms": 60000,
+      "rate_limit": {
+        "requests_per_second": 5,
+        "burst": 5
+      },
+      "description": "协议一：OpenAI Responses API（POST /v1/responses，Bearer 鉴权，instructions + input 部件数组，原生 json_schema）"
+    },
+    {
+      "model": "deepseek-v4-flash",
+      "upstream_model": "deepseek-v4-flash",
+      "protocol": "anthropic_messages",
+      "base_url": "http://127.0.0.1:9090",
+      "base_url_env": "UPSTREAM_MESSAGES_BASE_URL",
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "timeout_ms": 60000,
+      "rate_limit": {
+        "requests_per_second": 2,
+        "burst": 2
+      },
+      "description": "协议二：Anthropic Messages API（POST /v1/messages，x-api-key + anthropic-version，max_tokens 必填，结构化输出靠强制工具调用）"
+    },
+    {
+      "model": "deepseek-chat",
+      "upstream_model": "deepseek-chat",
+      "protocol": "openai_chat",
+      "base_url": "https://api.deepseek.com",
+      "base_url_env": "UPSTREAM_CHAT_BASE_URL",
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "timeout_ms": 120000,
+      "rate_limit": {
+        "requests_per_second": 3,
+        "burst": 3
+      },
+      "description": "协议三（真实上游）：DeepSeek 官方开放平台只提供 OpenAI Chat Completions 兼容协议，用真实 Key 端到端验证时走这条"
+    }
+  ]
+}

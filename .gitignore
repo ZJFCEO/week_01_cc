@@ -1,0 +1,16 @@
+# 编译产物
+/bin/
+*.exe
+
+# 运行时数据（提示词模板落盘）
+/data/*.json
+
+# 日志
+*.log
+
+# IDE
+.idea/
+.vscode/
+
+# macOS
+.DS_Store

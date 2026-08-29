@@ -1,0 +1,48 @@
+{
+  "listen": ":8080",
+  "prompt_store_path": "data/prompts.json",
+  "metrics_capacity": 500,
+  "log_metrics": true,
+  "retry": {
+    "max_retries": 3,
+    "base_delay_ms": 200,
+    "max_delay_ms": 5000,
+    "factor": 2,
+    "jitter": 0.2
+  },
+  "models": [
+    {
+      "model": "deepseek-v4-pro",
+      "upstream_model": "deepseek-v4-pro",
+      "protocol": "openai_responses",
+      "base_url": "https://api.deepseek.com",
+      "base_url_env": "UPSTREAM_RESPONSES_BASE_URL",
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "timeout_ms": 180000,
+      "rate_limit": { "requests_per_second": 3, "burst": 3 },
+      "description": "协议一：OpenAI Responses API，真实上游 POST https://api.deepseek.com/v1/responses"
+    },
+    {
+      "model": "deepseek-v4-flash",
+      "upstream_model": "deepseek-v4-flash",
+      "protocol": "anthropic_messages",
+      "base_url": "https://api.deepseek.com/anthropic",
+      "base_url_env": "UPSTREAM_MESSAGES_BASE_URL",
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "timeout_ms": 180000,
+      "rate_limit": { "requests_per_second": 3, "burst": 3 },
+      "description": "协议二：Anthropic Messages API，真实上游 POST https://api.deepseek.com/anthropic/v1/messages"
+    },
+    {
+      "model": "deepseek-chat",
+      "upstream_model": "deepseek-chat",
+      "protocol": "openai_chat",
+      "base_url": "https://api.deepseek.com",
+      "base_url_env": "UPSTREAM_CHAT_BASE_URL",
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "timeout_ms": 180000,
+      "rate_limit": { "requests_per_second": 3, "burst": 3 },
+      "description": "协议三：OpenAI Chat Completions，真实上游 POST https://api.deepseek.com/chat/completions"
+    }
+  ]
+}
