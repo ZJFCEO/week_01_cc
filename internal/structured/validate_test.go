@@ -106,3 +106,26 @@ func TestValidateSchemaAdditionalProperties(t *testing.T) {
 		t.Fatal("未声明的字段应被拒绝")
 	}
 }
+
+// TestValidateSchemaEnumTypeStrict 复现「enum 用字符串格式化比较」的漏洞：
+// enum:[1] 不应该接受字符串 "1"。
+func TestValidateSchemaEnumTypeStrict(t *testing.T) {
+	numEnum := map[string]any{"enum": []any{float64(1), float64(2)}}
+	if err := ValidateSchema("1", numEnum, "$"); err == nil {
+		t.Error(`字符串 "1" 不应匹配数字 enum 1`)
+	}
+	if err := ValidateSchema(float64(1), numEnum, "$"); err != nil {
+		t.Errorf("数字 1 应匹配数字 enum: %v", err)
+	}
+
+	strEnum := map[string]any{"enum": []any{"1", "true"}}
+	if err := ValidateSchema(float64(1), strEnum, "$"); err == nil {
+		t.Error(`数字 1 不应匹配字符串 enum "1"`)
+	}
+	if err := ValidateSchema(true, strEnum, "$"); err == nil {
+		t.Error(`布尔 true 不应匹配字符串 enum "true"`)
+	}
+	if err := ValidateSchema("1", strEnum, "$"); err != nil {
+		t.Errorf(`字符串 "1" 应匹配: %v`, err)
+	}
+}

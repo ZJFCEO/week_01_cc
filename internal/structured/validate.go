@@ -9,6 +9,7 @@ package structured
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 )
 
@@ -72,7 +73,7 @@ func ValidateSchema(value any, schema map[string]any, path string) error {
 	if enum, ok := schema["enum"].([]any); ok && len(enum) > 0 {
 		matched := false
 		for _, e := range enum {
-			if fmt.Sprintf("%v", e) == fmt.Sprintf("%v", value) {
+			if jsonEqual(e, value) {
 				matched = true
 				break
 			}
@@ -165,6 +166,30 @@ func checkType(value any, want string, path string) error {
 		}
 	}
 	return fmt.Errorf("%s 期望 %s，实际是 %s", path, want, got)
+}
+
+// jsonEqual 按 JSON 语义比较两个值：先比类型再比值。
+// 不能用 fmt.Sprintf("%v") 比较——那样数字 1 和字符串 "1" 会被判为相等，
+// enum 约束就形同虚设。
+func jsonEqual(a, b any) bool {
+	if jsonTypeOf(a) != jsonTypeOf(b) {
+		return false
+	}
+	switch av := a.(type) {
+	case nil:
+		return true
+	case bool:
+		bv, _ := b.(bool)
+		return av == bv
+	case float64:
+		bv, _ := b.(float64)
+		return av == bv
+	case string:
+		bv, _ := b.(string)
+		return av == bv
+	}
+	// 数组/对象作为 enum 取值极少见，退回深比较
+	return reflect.DeepEqual(a, b)
 }
 
 func jsonTypeOf(v any) string {

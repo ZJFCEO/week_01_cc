@@ -34,10 +34,13 @@ type ChatRequest struct {
 
 // ObsSummary 是随响应一起返回的可观测摘要。
 type ObsSummary struct {
-	LatencyMs    float64              `json:"latency_ms"`
-	TTFTMs       float64              `json:"ttft_ms,omitempty"`
-	Attempts     int                  `json:"attempts"`
-	Retries      int                  `json:"retries"`
+	LatencyMs float64 `json:"latency_ms"`
+	TTFTMs    float64 `json:"ttft_ms,omitempty"`
+	Attempts  int     `json:"attempts"`
+	Retries   int     `json:"retries"`
+	// BilledUsage 只在发生过重试、且被判废的尝试也消耗了 Token 时出现：
+	// 此时 usage 是本次结果的用量，BilledUsage 才是这次请求的真实总花销。
+	BilledUsage  *llm.Usage           `json:"billed_usage,omitempty"`
 	AttemptTrace []resilience.Attempt `json:"attempt_trace,omitempty"`
 }
 
@@ -212,12 +215,16 @@ func (g *Gateway) Invoke(ctx context.Context, requestID string, in *ChatRequest)
 		final   *llm.Response
 		cleaned string
 		parsed  any
+		// billed 累计所有尝试的真实消耗：只要上游返回了响应，Token 就已经产生并计费，
+		// 哪怕这次结果因为 JSON 不合法被判废。可观测数据必须反映真实花销。
+		billed llm.Usage
 	)
 	attempts, err := resilience.Do(ctx, g.Retry, func(attempt int) error {
 		resp, callErr := p.route.Adapter.Invoke(ctx, p.req)
 		if callErr != nil {
 			return callErr
 		}
+		billed.Add(resp.Usage)
 		c, pv, verr := validateStructured(p.req.ResponseFormat, resp.Content)
 		if verr != nil {
 			return verr
@@ -229,6 +236,8 @@ func (g *Gateway) Invoke(ctx context.Context, requestID string, in *ChatRequest)
 	rec.AttemptTrace = attempts
 	if err != nil {
 		aerr := apierr.From(err)
+		// 失败也要把已经烧掉的 Token 记进去，否则重试耗尽的请求会显示成 0 消耗
+		rec.Usage = billed
 		g.recordFailure(&rec, start, aerr)
 		return nil, aerr
 	}
@@ -252,9 +261,14 @@ func (g *Gateway) Invoke(ctx context.Context, requestID string, in *ChatRequest)
 			AttemptTrace: attempts,
 		},
 	}
+	// 有过被判废的尝试时，额外暴露累计计费用量，避免调用方低估成本
+	if billed != final.Usage {
+		b := billed
+		out.Observability.BilledUsage = &b
+	}
 	rec.Status = "ok"
 	rec.LatencyMs = round2(latency)
-	rec.Usage = final.Usage
+	rec.Usage = billed // 指标侧记真实花销，不是最后一次的用量
 	g.Metrics.Record(rec)
 	return out, nil
 }
@@ -306,6 +320,7 @@ func (g *Gateway) InvokeStream(ctx context.Context, requestID string, in *ChatRe
 		ttft    time.Duration // 首 Token 延迟
 		final   *llm.Response
 		sinkErr error
+		billed  llm.Usage // 与非流式一致：所有产生过用量的尝试都要累计
 	)
 
 	// ③ + ④ 重试只在「一块都还没吐出去」时生效
@@ -331,6 +346,7 @@ func (g *Gateway) InvokeStream(ctx context.Context, requestID string, in *ChatRe
 				}
 			case llm.EventDone:
 				final = ev.Response
+				billed.Add(ev.Response.Usage)
 			case llm.EventError:
 				attemptErr = ev.Err
 			}
@@ -360,6 +376,7 @@ func (g *Gateway) InvokeStream(ctx context.Context, requestID string, in *ChatRe
 
 	if err != nil {
 		aerr := apierr.From(err)
+		rec.Usage = billed // 失败也记已经烧掉的 Token
 		g.recordFailure(&rec, start, aerr)
 		_ = sink.Fail(aerr)
 		return aerr
@@ -368,6 +385,7 @@ func (g *Gateway) InvokeStream(ctx context.Context, requestID string, in *ChatRe
 	// ⑤ 结构化校验：流式下内容已经吐出去了，只能在收尾时报错，不做重试
 	cleaned, parsed, verr := validateStructured(p.req.ResponseFormat, final.Content)
 	if verr != nil {
+		rec.Usage = billed
 		g.recordFailure(&rec, start, verr)
 		_ = sink.Fail(verr)
 		return verr
@@ -393,9 +411,13 @@ func (g *Gateway) InvokeStream(ctx context.Context, requestID string, in *ChatRe
 			AttemptTrace: attempts,
 		},
 	}
+	if billed != final.Usage {
+		b := billed
+		out.Observability.BilledUsage = &b
+	}
 	rec.Status = "ok"
 	rec.LatencyMs = round2(latency)
-	rec.Usage = final.Usage
+	rec.Usage = billed
 	g.Metrics.Record(rec)
 	// 最后一步把 done 事件写给客户端；写失败只说明客户端已经走了，不影响指标已落库
 	if werr := sink.Done(out); werr != nil {

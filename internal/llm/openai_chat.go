@@ -224,6 +224,9 @@ func (a *OpenAIChatAdapter) Stream(ctx context.Context, req *Request) (<-chan St
 		reader := newSSEReader(httpResp.Body)
 		acc := &Response{ID: "chatcmpl_stream", FinishReason: FinishStop}
 		var sb strings.Builder
+		// 本协议的终止标记是 data: [DONE]，部分实现只在末个 chunk 给 finish_reason。
+		// 两者都没出现就 EOF，说明流被截断。
+		sawTerminal := false
 
 		emitDone := func() {
 			acc.Content = sb.String()
@@ -237,6 +240,11 @@ func (a *OpenAIChatAdapter) Stream(ctx context.Context, req *Request) (<-chan St
 			ev, err := reader.Next()
 			if err != nil {
 				if errors.Is(err, io.EOF) {
+					if !sawTerminal {
+						out <- StreamEvent{Type: EventError, Err: apierr.New(apierr.CodeUpstreamError,
+							"上游流被截断：已收到 %d 字节内容，但既无 [DONE] 也无 finish_reason", sb.Len())}
+						return
+					}
 					emitDone()
 					return
 				}
@@ -248,6 +256,7 @@ func (a *OpenAIChatAdapter) Stream(ctx context.Context, req *Request) (<-chan St
 				continue
 			}
 			if strings.TrimSpace(ev.Data) == "[DONE]" {
+				sawTerminal = true
 				emitDone()
 				return
 			}
@@ -270,6 +279,7 @@ func (a *OpenAIChatAdapter) Stream(ctx context.Context, req *Request) (<-chan St
 				}
 				if c.FinishReason != "" {
 					acc.FinishReason = mapChatFinish(c.FinishReason)
+					sawTerminal = true
 				}
 			}
 			// ③ 最后一个 chunk（choices 为空）携带 usage

@@ -260,10 +260,13 @@ func (a *OpenAIResponsesAdapter) Stream(ctx context.Context, req *Request) (<-ch
 		for {
 			ev, err := reader.Next()
 			if err != nil {
-				// ② 正常 EOF：若上游没发 response.completed，用累计文本兜底收尾
+				// ② EOF：只有收到过 response.completed 才算正常结束。
+				//    没收到就断开 = 流被截断，必须报错，绝不能拿半段文字当成功返回。
 				if errors.Is(err, io.EOF) {
 					if final == nil {
-						final = &Response{ID: "resp_stream", Content: sb.String(), FinishReason: FinishStop}
+						out <- StreamEvent{Type: EventError, Err: apierr.New(apierr.CodeUpstreamError,
+							"上游流被截断：已收到 %d 字节内容，但缺少 response.completed 事件", sb.Len())}
+						return
 					}
 					out <- StreamEvent{Type: EventDone, Response: final}
 					return

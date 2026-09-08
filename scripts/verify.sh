@@ -309,6 +309,9 @@ assert_neq "流式结构化也给出 parsed" "" "$(printf '%s' "$SDONE" | jget p
 # 非法 JSON 触发统一错误码
 BAD=$(post "${GW}/v1/chat" '{"model":"deepseek-v4-pro","messages":[{"role":"user","content":"给我 JSON [[MOCK:badjson]]"}],"response_format":{"type":"json_object"}}')
 assert_eq "上游吐非法 JSON 时返回 STRUCTURED_INVALID" "STRUCTURED_INVALID" "$(printf '%s' "$BAD" | jget error.code)"
+# 重试耗尽的请求，每次尝试都真实消耗了 Token，指标里必须如实累计（曾经记成 0）
+assert_num "重试耗尽时已消耗的 Token 被如实记录" \
+  "$(curl -s "${GW}/v1/traces?limit=1" | jget traces.0.usage.total_tokens)" ">" 0
 assert_eq "STRUCTURED_INVALID 被标记为可重试" "true" "$(printf '%s' "$BAD" | jget error.retryable)"
 assert_eq "json_schema 缺 schema 时拒绝请求" "INVALID_REQUEST" \
   "$(post "${GW}/v1/chat" '{"model":"deepseek-v4-pro","messages":[{"role":"user","content":"hi"}],"response_format":{"type":"json_schema"}}' | jget error.code)"

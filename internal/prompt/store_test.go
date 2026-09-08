@@ -1,6 +1,7 @@
 package prompt
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -134,5 +135,28 @@ func TestRefString(t *testing.T) {
 	}
 	if got := (&Ref{Name: "t"}).String(); got != "t@latest" {
 		t.Errorf("期望 t@latest，实际 %q", got)
+	}
+}
+
+// TestCreateReportsPersistFailure 复现「模板存盘失败仍报成功」：
+// 落盘写不进去时，Create 不能返回成功，否则重启后模板凭空消失。
+func TestCreateReportsPersistFailure(t *testing.T) {
+	dir := t.TempDir()
+	readonly := filepath.Join(dir, "ro")
+	if err := os.Mkdir(readonly, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(readonly, 0o755) })
+
+	s, err := NewStore(filepath.Join(readonly, "prompts.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Create("t", "", "内容 {{a}}", nil); err == nil {
+		t.Fatal("落盘失败时 Create 应该报错，而不是假装成功")
+	}
+	// 失败后内存里也不该留下半成品
+	if _, err := s.Get("t", 0); err == nil {
+		t.Error("落盘失败后不该在内存里留下该模板")
 	}
 }

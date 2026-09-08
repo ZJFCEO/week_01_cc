@@ -298,8 +298,11 @@ func (a *AnthropicMessagesAdapter) Stream(ctx context.Context, req *Request) (<-
 		for {
 			ev, err := reader.Next()
 			if err != nil {
+				// EOF 只有在收到 message_stop 之后才合法（那条分支里已经 return 了）。
+				// 走到这里说明流被截断，报错而不是拿半段文字冒充完整回复。
 				if errors.Is(err, io.EOF) {
-					emitDone()
+					out <- StreamEvent{Type: EventError, Err: apierr.New(apierr.CodeUpstreamError,
+						"上游流被截断：已收到 %d 字节内容，但缺少 message_stop 事件", sb.Len())}
 					return
 				}
 				out <- StreamEvent{Type: EventError, Err: apierr.FromTransport(err)}

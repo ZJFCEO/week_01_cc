@@ -116,9 +116,10 @@ func (s *Store) load() error {
 }
 
 // persist 在锁内调用，把全量模板写回磁盘。
-func (s *Store) persist() {
+// 必须把错误往上抛：否则会出现「接口返回创建成功、重启后模板消失」这种最难查的问题。
+func (s *Store) persist() error {
 	if s.path == "" {
-		return
+		return nil
 	}
 	var all []*Template
 	for _, list := range s.versions {
@@ -132,10 +133,21 @@ func (s *Store) persist() {
 	})
 	raw, err := json.MarshalIndent(all, "", "  ")
 	if err != nil {
-		return
+		return err
 	}
-	_ = os.MkdirAll(filepath.Dir(s.path), 0o755)
-	_ = os.WriteFile(s.path, raw, 0o644)
+	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
+		return err
+	}
+	// 先写临时文件再原子替换，避免写到一半进程崩溃留下半个损坏的 JSON
+	tmp := s.path + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, s.path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // ExtractVariables 扫描模板全文，返回去重后的变量名列表。
@@ -193,9 +205,16 @@ func (s *Store) Create(name, description, system string, msgs []llm.Message) (*T
 		Variables:   ExtractVariables(system, msgs),
 		CreatedAt:   time.Now().UTC(),
 	}
-	// ④ 入库 + 落盘
+	// ④ 入库 + 落盘。落盘失败要把内存改动回滚掉，
+	//    保证「接口返回成功」严格等价于「磁盘上真的有这一版」。
 	s.versions[name] = append(s.versions[name], t)
-	s.persist()
+	if err := s.persist(); err != nil {
+		s.versions[name] = s.versions[name][:len(s.versions[name])-1]
+		if len(s.versions[name]) == 0 {
+			delete(s.versions, name)
+		}
+		return nil, apierr.Wrap(err, apierr.CodeInternal, "模板落盘失败: %s", err.Error())
+	}
 	return t, nil
 }
 
