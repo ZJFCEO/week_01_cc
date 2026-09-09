@@ -483,6 +483,39 @@ X-Ratelimit-Burst: 2
 
 这也是 `X-RateLimit-Remaining` 值得存在的理由：`Limit` 是配置（读一次即可，每次响应都一样），`Remaining` 是状态，且是**唯一能跨调用方实例传递的同步信号**。
 
+#### 调用方怎么知道限流是多少
+
+本地桶要先有 `limit` 才能建，可 `limit` 得先调一次才知道——这是个先有鸡还是先有蛋的问题。四条路，按可靠性排序：
+
+| 路子 | 做法 | 代价 |
+|---|---|---|
+| ① 带外发现端点 | 启动时拉一次配置，一次拿到全部模型的配额 | 需要服务端提供这种端点 |
+| ② 带内学习 | 从任意一次响应的 `X-RateLimit-Limit` 头学 | **第一次是盲发的**，冷启动并发高时可能撞一片 429 |
+| ③ 文档 / 配置写死 | 按服务商文档手工配 | 文档会过期、账号等级不同、服务商临时调整都不知道 |
+| ④ AIMD | 不知道也照发，撞 429 就砍半、平稳就缓慢加回 | 必然要撞几次 429 当探测成本 |
+
+**本网关两条路都提供**：`GET /v1/models` 是路子 ①，每次响应的 `X-RateLimit-*` 头是路子 ②。推荐用 ①，一条业务请求都不用发就能建好所有桶：
+
+```python
+# 客户端启动时自举
+meta = GET("/v1/models")
+buckets = {
+    m["model"]: TokenBucket(m["rate_limit"]["requests_per_second"],
+                            m["rate_limit"]["burst"])
+    for m in meta["models"]
+}
+
+# 之后每次调用，按 model 挑对应的桶
+buckets[req.model].wait()
+send(req)
+```
+
+注意桶是**按 model 分的**，不是全局一个——要镜像服务端 [`Limiter`](internal/resilience/ratelimit.go) 里 `map[string]*bucket` 的分桶维度，否则 `deepseek-v4-pro` 的请求会被 `deepseek-v4-flash` 的配额卡住。
+
+现实中这四条路是**分层降级**关系：有元数据端点就用 ①，没有就退 ②，再没有退 ③，全都没有就 ④。不管哪条路建的桶，运行时都要叠加两条纠偏——响应里带 `Remaining` 就用它校正，撞到 429 就无条件降速。
+
+> 参考：GitHub 有 `GET /rate_limit`（路子 ①）；OpenAI 和 Anthropic 只给响应头（路子 ②）；DeepSeek 实测**两者都没有**，只能靠 ③ + ④。
+
 **问题 B · 网关侧**——必须准：
 
 | 方案 | 代价 | 适用 |
@@ -600,7 +633,7 @@ export UPSTREAM_CHAT_BASE_URL=http://127.0.0.1:9090        # 协议三
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | `GET`  | `/healthz` | 存活探针 |
-| `GET`  | `/v1/models` | 模型路由表：每个模型走哪套协议、限流配置、全局重试策略 |
+| `GET`  | `/v1/models` | 模型路由表：每个模型走哪套协议、限流配置、全局重试策略。**调用方可用它自举本地限流**，见[下文](#调用方怎么知道限流是多少) |
 | `POST` | `/v1/chat`<br>`/v1/chat/completions` | **统一调用入口**。`stream=true` 时返回 SSE，否则返回 JSON |
 | `POST` | `/v1/prompts` | 新建模板版本（同名自动 +1，旧版本不可变） |
 | `GET`  | `/v1/prompts` | 列出全部模板及最新版本 |
