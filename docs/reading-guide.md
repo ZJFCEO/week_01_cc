@@ -178,7 +178,7 @@ curl -s http://127.0.0.1:9090/mock/last-request | python3 -m json.tool
 |---|---|---|
 | `internal/apierr/errors.go` | 174 | `specs` 表把「HTTP 状态 + 是否可重试」绑定在错误码上。重试器只问 `Retryable`，完全不认识任何协议——**策略与机制分离** |
 | `internal/resilience/retry.go` | 105 | `Do` 是个高阶函数，把重试逻辑和业务逻辑彻底解耦。业务只管返回 error，重试器只管看错误码 |
-| `internal/resilience/ratelimit.go` | 125 | 令牌桶**惰性补充**：只在被访问时按流逝时间补令牌，不需要任何后台 goroutine |
+| `internal/resilience/ratelimit.go` | 125 | 令牌桶**惰性补充**：只在被访问时按流逝时间补令牌，不需要任何后台 goroutine。读完看 README 的[分布式限流](../README.md#分布式限流两个问题别混)一节——调用方的桶是自我约束、网关的桶是执法，两者算错的代价完全不同 |
 | `internal/observability/collector.go` | 270 | 环形缓冲防止长跑内存无限增长；分位数在**读**的时候才算，写路径保持轻 |
 | `internal/prompt/store.go` | 305 | 版本快照不可变，永不覆盖；变量缺失直接报错，而不是把 `{{text}}` 静默发给模型 |
 | `internal/structured/validate.go` | 191 | 容错抽取：先剥 Markdown 围栏，失败再截最外层括号。**对模型的输出要有防御心** |
