@@ -113,19 +113,20 @@ sequenceDiagram
     Note over S,G: 懒写头：还没写出字节之前，<br/>准备期错误仍返回标准 JSON + 正确状态码
 
     G->>G: ① 准备（校验 · 路由 · 模板渲染）
-    G->>G: ② 限流
-    G->>S: Meta(requestID, model, protocol)
-    S-->>C: event: meta
+    G->>G: ② 限流（配额写进响应头，此时头还没提交）
 
-    Note over G,U: ③ 建流：此刻还没吐出任何内容，失败可以重来
+    Note over G,U: ③ 建流：一个字节都还没写出去，失败可以重来<br/>而且能返回正确的 HTTP 状态码
     loop 首 Token 之前最多重试 3 次
         G->>A: Stream(ctx, 统一请求)
         A->>U: stream=true
         alt 建流失败
             U-->>A: 4xx / 5xx / 超时
             A-->>G: apierr.Error（retryable 则退避后重来）
+            Note over C,G: 重试耗尽 → 标准 JSON + 502/401/429<br/>不是 200 套 SSE error
         else 建流成功
             U-->>A: SSE 事件流
+            G->>S: Meta(requestID, model, protocol)
+            S-->>C: event: meta（首个字节，响应头在此定型）
         end
     end
 
@@ -159,6 +160,7 @@ sequenceDiagram
 - 所有 `delta` 拼接起来必须等于 `done` 里的完整文本，验收脚本对这一条有断言。
 - `[DONE]` 哨兵是为了兼容按 OpenAI 习惯写的客户端。
 - **断流不算成功**：上游没发终止事件就断开，一律报 `UPSTREAM_ERROR`，绝不拿半段文字冒充完整回复。
+- **meta 发在上游握手之后**：这样建流阶段的失败还能返回正确的 HTTP 状态码（502/401/429），而不是先写 200 再用 SSE `error` 事件找补。成功路径的事件顺序完全不变，meta 仍是客户端收到的第一个事件。
 
 ---
 

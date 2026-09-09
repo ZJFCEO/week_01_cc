@@ -317,6 +317,7 @@ func (g *Gateway) InvokeStream(ctx context.Context, requestID string, in *ChatRe
 	rec.PromptRef = p.promptRef
 
 	// ② 限流；必须在 sink 写出第一个字节之前完成，否则响应头就锁死了
+	//    （首个字节由下面重试循环里的 sink.Meta 写出）
 	decision, aerr := g.checkLimit(p.route.Model)
 	if onLimit != nil {
 		onLimit(decision)
@@ -326,23 +327,32 @@ func (g *Gateway) InvokeStream(ctx context.Context, requestID string, in *ChatRe
 		return aerr
 	}
 
-	if err := sink.Meta(requestID, p.route.Model, p.route.Protocol, p.promptRef); err != nil {
-		return apierr.Wrap(err, apierr.CodeCanceled, "客户端已断开")
-	}
-
 	var (
-		emitted int           // 已经吐给客户端的块数，>0 之后不能再重试
-		ttft    time.Duration // 首 Token 延迟
-		final   *llm.Response
-		sinkErr error
-		billed  llm.Usage // 与非流式一致：所有产生过用量的尝试都要累计
+		emitted  int           // 已经吐给客户端的块数，>0 之后不能再重试
+		metaSent bool          // meta 事件只发一次，重试时不重复发
+		ttft     time.Duration // 首 Token 延迟
+		final    *llm.Response
+		sinkErr  error
+		billed   llm.Usage // 与非流式一致：所有产生过用量的尝试都要累计
 	)
 
 	// ③ + ④ 重试只在「一块都还没吐出去」时生效
 	attempts, err := resilience.Do(ctx, g.Retry, func(attempt int) error {
 		ch, streamErr := p.route.Adapter.Stream(ctx, p.req)
 		if streamErr != nil {
-			return streamErr // 建流失败，可重试
+			// 建流失败，可重试。
+			// 关键：此刻还没往连接里写过任何字节，响应头没提交，
+			// 所以重试全部耗尽时上层仍能返回正确的 HTTP 状态码（502/429/401…），
+			// 而不是先写个 200 再用 SSE error 事件找补。
+			return streamErr
+		}
+		// 上游确认接单之后才对客户端开流。meta 依然是客户端收到的第一个事件，
+		// 只是推迟到握手结果明朗之后再发——成功路径的事件顺序完全不变。
+		if !metaSent {
+			if err := sink.Meta(requestID, p.route.Model, p.route.Protocol, p.promptRef); err != nil {
+				return apierr.Wrap(err, apierr.CodeCanceled, "客户端已断开")
+			}
+			metaSent = true
 		}
 		var attemptErr error
 		// 必须把通道读到关闭，否则适配器的 goroutine 会阻塞泄漏

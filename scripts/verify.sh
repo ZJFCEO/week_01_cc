@@ -265,9 +265,26 @@ for M in deepseek-v4-pro deepseek-v4-flash; do
   assert_num "[$M] done 里 latency_ms >= ttft_ms" "$(printf '%s' "$DONE" | jget observability.latency_ms)" ">=" "$(printf '%s' "$DONE" | jget observability.ttft_ms)"
   assert_num "[$M] done 里带完整 Token 用量" "$(printf '%s' "$DONE" | jget usage.total_tokens)" ">" 0
 done
-# 流式下的准备期错误仍然是标准 JSON 错误（而不是 SSE）
+# 流式下「还没吐出任何字节」的错误，一律走标准 JSON + 正确状态码，
+# 而不是先写个 200 再用 SSE error 事件找补
 assert_eq "流式请求遇到未注册模型仍返回 404 JSON" "404" \
   "$(post_code "${GW}/v1/chat" '{"model":"nope","stream":true,"messages":[{"role":"user","content":"hi"}]}')"
+assert_eq "流式建流阶段上游持续 500 -> HTTP 502（不是 200）" "502" \
+  "$(curl -sN -o /dev/null -w '%{http_code}' --max-time 30 -X POST "${GW}/v1/chat" -H 'Content-Type: application/json' \
+     -d '{"model":"deepseek-v4-pro","stream":true,"messages":[{"role":"user","content":"x [[MOCK:status=500]]"}]}')"
+assert_eq "流式建流阶段上游 401 -> HTTP 401（不可重试，直接抛）" "401" \
+  "$(curl -sN -o /dev/null -w '%{http_code}' --max-time 30 -X POST "${GW}/v1/chat" -H 'Content-Type: application/json' \
+     -d '{"model":"deepseek-v4-pro","stream":true,"messages":[{"role":"user","content":"x [[MOCK:status=401]]"}]}')"
+SF="${TMPDIR_V}/stream_fail.txt"
+curl -sN -o "$SF" --max-time 30 -X POST "${GW}/v1/chat" -H 'Content-Type: application/json' \
+  -d '{"model":"deepseek-v4-pro","stream":true,"messages":[{"role":"user","content":"x [[MOCK:status=500]]"}]}'
+assert_eq "建流失败时不该已经发出 meta 事件" "0" "$(grep -c '^event: meta' "$SF" | tr -d ' ')"
+assert_eq "建流失败时响应体是 JSON 而非 SSE" "UPSTREAM_ERROR" "$(cat "$SF" | jget error.code)"
+# 首块之前失败可重试，重试成功后 meta 只能出现一次
+SM="${TMPDIR_V}/stream_meta_once.sse"
+curl -sN --max-time 30 -X POST "${GW}/v1/chat" -H 'Content-Type: application/json' \
+  -d "{\"model\":\"deepseek-v4-pro\",\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":\"重试 [[MOCK:fail=2,id=meta-$$-$RANDOM]]\"}]}" > "$SM"
+assert_eq "重试成功后 meta 事件只发一次" "1" "$(grep -c '^event: meta' "$SM" | tr -d ' ')"
 
 # =============================================================================
 section "C. 结构化输出"

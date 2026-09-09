@@ -131,7 +131,14 @@ func (s *sseSink) Done(resp *service.ChatResponse) error {
 }
 
 // Fail 流中出错：以 error 事件下发统一错误码。
+//
+// 但如果一个字节都还没写出去（上游建流阶段就失败了），这里什么都不做——
+// 保持响应头未提交，让 HTTP 层用标准 JSON + 正确状态码返回，
+// 而不是先写个 200 再用 error 事件找补。
 func (s *sseSink) Fail(e *apierr.Error) error {
+	if !s.started {
+		return nil
+	}
 	return s.write("error", errorBody{Error: errorPayload{
 		Code:           string(e.Code),
 		Message:        e.Message,
