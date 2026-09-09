@@ -9,6 +9,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"llmgateway/internal/apierr"
+	"llmgateway/internal/resilience"
 	"llmgateway/internal/service"
 )
 
@@ -21,17 +22,26 @@ func (s *Server) handleChat(c *gin.Context) {
 		abortErr(c, apierr.New(apierr.CodeInvalidRequest, "请求体不是合法 JSON: %s", err.Error()))
 		return
 	}
-	// ② 该模型的限流配额透出到响应头，方便客户端自适应
-	if cfg, ok := s.gw.Limiter.Config(req.Model); ok {
-		c.Writer.Header().Set("X-RateLimit-Limit", strconv.FormatFloat(cfg.RequestsPerSecond, 'f', -1, 64))
-		c.Writer.Header().Set("X-RateLimit-Burst", strconv.Itoa(cfg.Burst))
+	// ② 限流配额透出到响应头。判定在编排层做，结果回调到这里；
+	//    放行和被拒都会写，所以客户端拿到 429 时同样能看到完整配额状态。
+	//    Limit/Burst 是静态配置（读一次即可），Remaining/Reset 是动态状态（每次都变）。
+	writeRateLimitHeaders := func(d resilience.Decision) {
+		if d.Remaining < 0 {
+			return // 该模型没配限流，不写这组头，免得客户端误以为有配额约束
+		}
+		h := c.Writer.Header()
+		h.Set("X-RateLimit-Limit", strconv.FormatFloat(d.Limit, 'f', -1, 64))
+		h.Set("X-RateLimit-Burst", strconv.Itoa(d.Burst))
+		h.Set("X-RateLimit-Remaining", strconv.Itoa(d.Remaining))
+		// Reset 用「秒」表示桶补满还需多久，秒级以下的桶也能表达
+		h.Set("X-RateLimit-Reset", strconv.FormatFloat(d.ResetAfter.Seconds(), 'f', 3, 64))
 	}
 
 	rid := requestID(c)
 	// ③ 流式分支
 	if req.Stream {
 		sink := newSSESink(c)
-		if aerr := s.gw.InvokeStream(c.Request.Context(), rid, &req, sink); aerr != nil {
+		if aerr := s.gw.InvokeStream(c.Request.Context(), rid, &req, sink, writeRateLimitHeaders); aerr != nil {
 			// 还没往连接里写过任何字节，就还能返回标准 JSON 错误（带正确状态码）
 			if !sink.started {
 				abortErr(c, aerr)
@@ -42,7 +52,7 @@ func (s *Server) handleChat(c *gin.Context) {
 	}
 
 	// ③ 非流式分支
-	resp, aerr := s.gw.Invoke(c.Request.Context(), rid, &req)
+	resp, aerr := s.gw.Invoke(c.Request.Context(), rid, &req, writeRateLimitHeaders)
 	if aerr != nil {
 		abortErr(c, aerr)
 		return

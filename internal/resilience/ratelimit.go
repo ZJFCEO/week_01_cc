@@ -22,12 +22,16 @@ type bucket struct {
 }
 
 // Decision 是一次限流判定结果，用于填充 X-RateLimit-* 响应头。
+//
+// 注意 Remaining/ResetAfter 只有在真正做过判定（调用 Allow）之后才有意义——
+// 光看静态配置是算不出来的，这也是判定结果必须从编排层回传到 HTTP 层的原因。
 type Decision struct {
 	Allowed    bool
-	Limit      float64
-	Burst      int
-	Remaining  int
-	RetryAfter time.Duration
+	Limit      float64       // 稳态速率，来自配置，每次都一样
+	Burst      int           // 桶容量，来自配置，每次都一样
+	Remaining  int           // 扣减后桶里还剩几个令牌；未配置限流时为 -1
+	ResetAfter time.Duration // 桶补满还需多久
+	RetryAfter time.Duration // 仅拒绝时有意义：至少等这么久再来
 }
 
 // Limiter 按模型维度做独立限流：每个模型一个桶，互不影响。
@@ -102,17 +106,29 @@ func (l *Limiter) Allow(model string) Decision {
 		b.tokens -= 1
 		d.Allowed = true
 		d.Remaining = int(b.tokens)
+		d.ResetAfter = b.refillDuration()
 		return d
 	}
 	// ④ 拒绝：算出补满 1 个令牌需要的时间作为 Retry-After
 	need := 1 - b.tokens
 	d.Allowed = false
 	d.Remaining = 0
+	d.ResetAfter = b.refillDuration()
 	d.RetryAfter = time.Duration(need / b.rate * float64(time.Second))
 	if d.RetryAfter < time.Millisecond {
 		d.RetryAfter = time.Millisecond
 	}
 	return d
+}
+
+// refillDuration 返回桶从当前水位补满还需要多久，用于 X-RateLimit-Reset。
+// 调用方需持有锁。
+func (b *bucket) refillDuration() time.Duration {
+	missing := b.burst - b.tokens
+	if missing <= 0 {
+		return 0
+	}
+	return time.Duration(missing / b.rate * float64(time.Second))
 }
 
 // Reject 构造统一的限流错误。

@@ -438,11 +438,33 @@ done
 HTTP/1.1 429 Too Many Requests
 Retry-After: 1
 X-Retry-After-Ms: 451
-X-Ratelimit-Limit: 2
-X-Ratelimit-Burst: 2
+X-RateLimit-Limit: 2
+X-RateLimit-Burst: 2
+X-RateLimit-Remaining: 0
+X-RateLimit-Reset: 0.978
 
 {"error":{"code":"RATE_LIMITED","message":"模型 deepseek-v4-flash 触发限流（2.00 req/s, burst 2），请 450ms 后重试","retryable":false,"retry_after_ms":451}}
 ```
+
+这组头**每次响应都有**（放行时也写），流式响应同样带。四个头分两类：
+
+| 头 | 类型 | 含义 | 客户端怎么用 |
+|---|---|---|---|
+| `X-RateLimit-Limit` | 静态配置 | 稳态速率，每次都一样 | **读一次**，初始化本地令牌桶 |
+| `X-RateLimit-Burst` | 静态配置 | 桶容量，每次都一样 | 同上 |
+| `X-RateLimit-Remaining` | 动态状态 | 扣减后还剩几个令牌 | **每次都读**，校正本地桶（多实例共享配额时唯一可靠的同步信号） |
+| `X-RateLimit-Reset` | 动态状态 | 桶补满还需几秒 | 决定睡多久 |
+
+连打四次的实测（`deepseek-v4-flash`，2 req/s、burst 2）：
+
+```
+第1次  200  Remaining: 1  Reset: 0.500
+第2次  200  Remaining: 0  Reset: 0.987
+第3次  429  Remaining: 0  Reset: 0.978   ← 被拒时头仍在
+第4次  429  Remaining: 0  Reset: 0.970   ← Reset 随桶补充而变化
+```
+
+没配置限流的模型不会出现这组头，免得客户端误以为有配额约束。
 
 限流是**按模型独立**的：`deepseek-v4-flash` 被打满时，`deepseek-v4-pro` 完全不受影响。
 
@@ -481,7 +503,7 @@ X-Ratelimit-Burst: 2
 | AIMD（撞 429 降速、平稳时加速） | 上游不告知配额时用（例如直连 DeepSeek——实测它一个限流头都不给） |
 | ~~Redis~~ | 为一个「优化」引入分布式依赖不划算，桶算错了网关会兜住 |
 
-这也是 `X-RateLimit-Remaining` 值得存在的理由：`Limit` 是配置（读一次即可，每次响应都一样），`Remaining` 是状态，且是**唯一能跨调用方实例传递的同步信号**。
+这也是 `X-RateLimit-Remaining` 值得存在的理由：`Limit` 是配置（读一次即可，每次响应都一样），`Remaining` 是状态，且是**唯一能跨调用方实例传递的同步信号**。本网关这四个头都会返回，见[⑥ 韧性](#-韧性统一错误码--指数退避重试--按模型独立限流)一节的实测输出。
 
 #### 调用方怎么知道限流是多少
 
@@ -702,10 +724,10 @@ export UPSTREAM_CHAT_BASE_URL=http://127.0.0.1:9090        # 协议三
 ./scripts/verify.sh
 ```
 
-脚本会自己编译、拉起假上游（`:19090`）和网关（`:18080`）、跑完全部断言、清理进程。**178 项断言，全部离线，无需真实 Key**：
+脚本会自己编译、拉起假上游（`:19090`）和网关（`:18080`）、跑完全部断言、清理进程。**185 项断言，全部离线，无需真实 Key**：
 
 ```
-共 178 项断言：通过 178，失败 0
+共 185 项断言：通过 185，失败 0
 
 六大功能点全部通过验收。
   A. 双协议路由 · B. 流式输出 · C. 结构化输出
@@ -723,7 +745,7 @@ export UPSTREAM_CHAT_BASE_URL=http://127.0.0.1:9090        # 协议三
 
 脚本第 0 步会先跑 `go build` / `go vet` / `go test`，所以单元测试也在验收范围内。
 
-单元测试有 50 个用例，覆盖纯逻辑部分：协议翻译（两个适配器的请求/响应双向映射、消息序列归一、结构化输出的两种表达）、SSE 解析、指数退避区间、令牌桶与按模型隔离、错误码分流、JSON 抽取与 Schema 校验、模板版本递增与落盘、指标聚合与分位数。
+单元测试有 52 个用例，覆盖纯逻辑部分：协议翻译（两个适配器的请求/响应双向映射、消息序列归一、结构化输出的两种表达）、SSE 解析、指数退避区间、令牌桶与按模型隔离、错误码分流、JSON 抽取与 Schema 校验、模板版本递增与落盘、指标聚合与分位数。
 
 ```bash
 go test ./...
@@ -784,6 +806,6 @@ go test ./...
 ├── configs/
 │   ├── gateway.json        模型路由表（上游=内置 mock，离线验收用）
 │   └── gateway.real.json   模型路由表（上游=真实 DeepSeek）
-├── scripts/verify.sh       全功能验收脚本（178 项断言）
+├── scripts/verify.sh       全功能验收脚本（185 项断言）
 └── Makefile
 ```

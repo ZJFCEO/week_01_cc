@@ -78,3 +78,46 @@ func TestLimiterUnconfiguredPassthrough(t *testing.T) {
 		}
 	}
 }
+
+// TestDecisionResetAfter 验证 X-RateLimit-Reset 的来源：桶补满还需多久。
+func TestDecisionResetAfter(t *testing.T) {
+	l := NewLimiter()
+	now := time.Now()
+	l.now = func() time.Time { return now }
+	l.Configure("m", LimitConfig{RequestsPerSecond: 2, Burst: 4})
+
+	// 满桶时拿一个：还剩 3，补满 1 个需要 0.5s
+	d := l.Allow("m")
+	if d.Remaining != 3 {
+		t.Fatalf("扣减后应剩 3，实际 %d", d.Remaining)
+	}
+	if d.ResetAfter != 500*time.Millisecond {
+		t.Fatalf("补满 1 个令牌应需 500ms，实际 %v", d.ResetAfter)
+	}
+	// 掏空：还剩 0，补满 4 个需要 2s
+	for range 3 {
+		d = l.Allow("m")
+	}
+	if d.Remaining != 0 || d.ResetAfter != 2*time.Second {
+		t.Fatalf("掏空后应 Remaining=0 / ResetAfter=2s，实际 %d / %v", d.Remaining, d.ResetAfter)
+	}
+	// 再要就被拒，此时 Reset 仍是补满全桶的时间，RetryAfter 才是补 1 个的时间
+	d = l.Allow("m")
+	if d.Allowed {
+		t.Fatal("桶已空应拒绝")
+	}
+	if d.RetryAfter != 500*time.Millisecond {
+		t.Errorf("补 1 个令牌应需 500ms，实际 %v", d.RetryAfter)
+	}
+	if d.ResetAfter != 2*time.Second {
+		t.Errorf("补满全桶应需 2s，实际 %v", d.ResetAfter)
+	}
+}
+
+// TestDecisionUnconfiguredRemainingNegative 未配置限流时 Remaining 用 -1 标记，
+// HTTP 层据此决定不写 X-RateLimit-* 这组头。
+func TestDecisionUnconfiguredRemainingNegative(t *testing.T) {
+	if d := NewLimiter().Allow("no-such-model"); !d.Allowed || d.Remaining != -1 {
+		t.Fatalf("未配置限流应放行且 Remaining=-1，实际 %+v", d)
+	}
+}

@@ -472,8 +472,24 @@ assert_num "限流响应给出 retry_after_ms" "$(printf '%s' "$RL" | jget error
 assert_has "限流提示里点明了是哪个模型" "$(printf '%s' "$RL" | jget error.message)" "deepseek-chat"
 RLH=$(curl -s -D - -o /dev/null -X POST "${GW}/v1/chat" -H 'Content-Type: application/json' -d '{"model":"deepseek-chat","messages":[{"role":"user","content":"限流测试"}]}')
 assert_has "429 响应带 Retry-After 头"        "$RLH" "Retry-After:"
-assert_has "429 响应带 X-RateLimit-Limit 头"  "$RLH" "X-Ratelimit-Limit:"
-assert_has "429 响应带 X-RateLimit-Burst 头"  "$RLH" "X-Ratelimit-Burst:"
+assert_has "429 响应带 X-RateLimit-Limit 头"      "$RLH" "X-Ratelimit-Limit:"
+assert_has "429 响应带 X-RateLimit-Burst 头"      "$RLH" "X-Ratelimit-Burst:"
+assert_has "429 响应仍带 X-RateLimit-Remaining 头" "$RLH" "X-Ratelimit-Remaining:"
+assert_has "429 响应仍带 X-RateLimit-Reset 头"     "$RLH" "X-Ratelimit-Reset:"
+
+printf "\n  ${YELLOW}—— 动态配额状态（Remaining / Reset）——${RESET}\n"
+sleep_ms 2.5   # 等桶补满
+hdr_val() { printf '%s' "$1" | tr -d '\r' | grep -i "^$2:" | head -1 | cut -d' ' -f2; }
+H1=$(curl -s -D - -o /dev/null -X POST "${GW}/v1/chat" -H 'Content-Type: application/json' -d '{"model":"deepseek-chat","messages":[{"role":"user","content":"x"}]}')
+H2=$(curl -s -D - -o /dev/null -X POST "${GW}/v1/chat" -H 'Content-Type: application/json' -d '{"model":"deepseek-chat","messages":[{"role":"user","content":"x"}]}')
+R1=$(hdr_val "$H1" "X-Ratelimit-Remaining"); R2=$(hdr_val "$H2" "X-Ratelimit-Remaining")
+assert_neq "Remaining 头有值" "" "$R1"
+assert_num "Remaining 随每次调用递减（动态状态，不是静态配置）" "$R2" "<" "$R1"
+assert_num "Reset 头是正数（桶补满还需多久）" "$(hdr_val "$H1" "X-Ratelimit-Reset")" ">" 0
+assert_eq  "Limit 头是静态配置，两次调用完全一样" "$(hdr_val "$H1" "X-Ratelimit-Limit")" "$(hdr_val "$H2" "X-Ratelimit-Limit")"
+assert_has "流式响应同样带配额头" \
+  "$(curl -sN -D - -o /dev/null --max-time 20 -X POST "${GW}/v1/chat" -H 'Content-Type: application/json' -d '{"model":"deepseek-v4-pro","stream":true,"messages":[{"role":"user","content":"x"}]}')" \
+  "X-Ratelimit-Remaining:"
 # 关键：限流是按模型独立的，一个模型被打满不影响其它模型
 assert_eq "chat 被打满时 pro 仍然可用（限流按模型独立）" "200" \
   "$(post_code "${GW}/v1/chat" '{"model":"deepseek-v4-pro","messages":[{"role":"user","content":"我不该被牵连"}]}')"

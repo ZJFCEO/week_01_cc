@@ -150,6 +150,13 @@ func (g *Gateway) prepare(in *ChatRequest) (*prepared, *apierr.Error) {
 	return &prepared{route: route, req: lreq, promptRef: promptRef}, nil
 }
 
+// RateLimitReporter 在限流判定完成后被调用一次（放行与拒绝都会调）。
+//
+// 为什么要回调而不是直接返回：判定发生在编排层，但 X-RateLimit-* 响应头
+// 必须由 HTTP 层写，且成功和失败两条路径都要写——用返回值传递会漏掉错误路径。
+// 这和 StreamSink 是同一个套路：编排层回调 HTTP 层。
+type RateLimitReporter func(resilience.Decision)
+
 // checkLimit 是主流程第 ④ 步：按模型独立限流。
 // 超限直接返回 429，不进入重试（重试只针对上游故障，不针对本地配额）。
 func (g *Gateway) checkLimit(model string) (resilience.Decision, *apierr.Error) {
@@ -185,7 +192,7 @@ func validateStructured(rf *llm.ResponseFormat, content string) (string, any, *a
 //
 // 主流程：① 准备（校验/路由/模板） → ② 限流 → ③ 指数退避重试地调用适配器
 // → ④ 结构化校验（失败可触发重试） → ⑤ 落可观测记录
-func (g *Gateway) Invoke(ctx context.Context, requestID string, in *ChatRequest) (*ChatResponse, *apierr.Error) {
+func (g *Gateway) Invoke(ctx context.Context, requestID string, in *ChatRequest, onLimit RateLimitReporter) (*ChatResponse, *apierr.Error) {
 	start := time.Now()
 	rec := observability.Record{
 		RequestID:  requestID,
@@ -204,8 +211,12 @@ func (g *Gateway) Invoke(ctx context.Context, requestID string, in *ChatRequest)
 	rec.Protocol = p.route.Protocol
 	rec.PromptRef = p.promptRef
 
-	// ② 限流
-	if _, aerr := g.checkLimit(p.route.Model); aerr != nil {
+	// ② 限流；判定结果无论放行还是拒绝都回传给 HTTP 层去写响应头
+	decision, aerr := g.checkLimit(p.route.Model)
+	if onLimit != nil {
+		onLimit(decision)
+	}
+	if aerr != nil {
 		g.recordFailure(&rec, start, aerr)
 		return nil, aerr
 	}
@@ -285,7 +296,7 @@ type StreamSink interface {
 //
 // 主流程：① 准备 → ② 限流 → ③ 建流（首 Token 之前失败仍可重试）
 // → ④ 逐块转发并测量首 Token 延迟 → ⑤ 结构化校验 → ⑥ 落可观测记录
-func (g *Gateway) InvokeStream(ctx context.Context, requestID string, in *ChatRequest, sink StreamSink) *apierr.Error {
+func (g *Gateway) InvokeStream(ctx context.Context, requestID string, in *ChatRequest, sink StreamSink, onLimit RateLimitReporter) *apierr.Error {
 	start := time.Now()
 	rec := observability.Record{
 		RequestID:  requestID,
@@ -305,8 +316,12 @@ func (g *Gateway) InvokeStream(ctx context.Context, requestID string, in *ChatRe
 	rec.Protocol = p.route.Protocol
 	rec.PromptRef = p.promptRef
 
-	// ② 限流
-	if _, aerr := g.checkLimit(p.route.Model); aerr != nil {
+	// ② 限流；必须在 sink 写出第一个字节之前完成，否则响应头就锁死了
+	decision, aerr := g.checkLimit(p.route.Model)
+	if onLimit != nil {
+		onLimit(decision)
+	}
+	if aerr != nil {
 		g.recordFailure(&rec, start, aerr)
 		return aerr
 	}
